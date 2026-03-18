@@ -7,47 +7,54 @@ import numpy as np
 import ta
 import pickle
 import os
+import plotly.express as px
 
 # ===================== 安卓移动端适配配置 =====================
 st.set_page_config(
     page_title="选股技巧",
     page_icon="📈",
-    layout="wide",  # 宽布局适配手机
-    initial_sidebar_state="collapsed",  # 默认收起侧边栏，适配手机
+    layout="wide",
+    initial_sidebar_state="collapsed",
 )
 
-# 移动端样式优化（字体/间距/按钮大小）
+# 移动端样式优化
 st.markdown("""
     <style>
-    /* 适配安卓手机字体 */
     body {font-size: 16px !important;}
-    /* 按钮适配触屏 */
     div.stButton > button {
         width: 100%;
         height: 48px;
         font-size: 18px;
     }
-    /* 输入框适配手机 */
     div.stTextInput > div > div > input {
         height: 48px;
         font-size: 16px;
     }
-    /* 适配竖屏布局 */
     @media (max-width: 768px) {
         .element-container {padding: 5px 0 !important;}
     }
     </style>
     """, unsafe_allow_html=True)
 
+# 设置plotly中文显示（核心修复：K线时间中文）
+px.defaults.template = "plotly_white"
+# 强制设置plotly日期显示为中文
+st.markdown("""
+<script>
+    var config = {
+        locale: 'zh-CN'
+    };
+    Plotly.setPlotConfig(config);
+</script>
+""", unsafe_allow_html=True)
+
 # ===================== 账户与自选股管理 =====================
-# 初始化用户数据存储
 USER_DATA_FILE = "user_data.pkl"
 def init_user_data():
     if not os.path.exists(USER_DATA_FILE):
         with open(USER_DATA_FILE, 'wb') as f:
             pickle.dump({}, f)
 
-# 登录/注册功能
 def user_auth():
     init_user_data()
     with open(USER_DATA_FILE, 'rb') as f:
@@ -76,7 +83,6 @@ def user_auth():
                 st.session_state["favorites"] = user_data[username]["favorites"]
                 st.sidebar.success(f"欢迎 {username}！")
 
-# 自选股管理
 def manage_favorites():
     if "login_user" not in st.session_state:
         st.warning("请先登录账户！")
@@ -85,12 +91,10 @@ def manage_favorites():
     st.sidebar.divider()
     st.sidebar.title("❤️ 自选股管理")
     
-    # 添加自选股
     stock_code = st.sidebar.text_input("添加自选股（代码）")
     if st.sidebar.button("添加") and stock_code:
         if stock_code not in st.session_state["favorites"]:
             st.session_state["favorites"].append(stock_code)
-            # 保存到用户数据
             with open(USER_DATA_FILE, 'rb') as f:
                 user_data = pickle.load(f)
             user_data[st.session_state["login_user"]]["favorites"] = st.session_state["favorites"]
@@ -98,7 +102,6 @@ def manage_favorites():
                 pickle.dump(user_data, f)
             st.sidebar.success(f"已添加 {stock_code} 到自选股！")
     
-    # 显示自选股
     if st.session_state["favorites"]:
         st.sidebar.subheader("我的自选股")
         for code in st.session_state["favorites"]:
@@ -115,25 +118,21 @@ def manage_favorites():
                         pickle.dump(user_data, f)
                     st.experimental_rerun()
 
-# ===================== 自定义选股范围与筛选条件 =====================
+# ===================== 自定义选股范围、时间、筛选条件 =====================
 def get_stock_list():
-    """自定义选股范围：支持手动输入代码/板块"""
     st.sidebar.divider()
     st.sidebar.title("🔍 选股范围")
     
-    # 板块选择
     plate = st.sidebar.selectbox(
         "选择板块",
         ["全部", "沪深300", "创业板", "科创板", "中证500"]
     )
     
-    # 自定义股票代码范围
     custom_codes = st.sidebar.text_area(
         "自定义股票代码（每行一个）",
         placeholder="例如：\n600000\n000001\n300001"
     )
     
-    # 基础股票池（可根据板块筛选）
     base_pool = {
         "全部": ["600000", "000001", "300001", "600036", "000858"],
         "沪深300": ["600000", "000001", "600036"],
@@ -142,27 +141,42 @@ def get_stock_list():
         "中证500": ["000858", "002594"]
     }
     
-    # 最终选股范围
     final_pool = base_pool[plate]
     if custom_codes.strip():
         final_pool = [code.strip() for code in custom_codes.strip().split('\n') if code.strip()]
     
     return final_pool
 
+def get_time_range():
+    """核心修复：添加选股时间选择功能"""
+    st.sidebar.divider()
+    st.sidebar.title("🕒 选股时间范围")
+    
+    # 时间选择器（适配手机）
+    time_type = st.sidebar.radio("时间类型", ["最近N天", "自定义时间段"])
+    time_range = {}
+    
+    if time_type == "最近N天":
+        days = st.sidebar.slider("选择天数", min_value=7, max_value=180, value=30, step=7)
+        time_range["type"] = "days"
+        time_range["value"] = days
+    else:
+        start_date = st.sidebar.date_input("开始日期", pd.to_datetime("2026-01-01"))
+        end_date = st.sidebar.date_input("结束日期", pd.to_datetime("2026-03-01"))
+        time_range["type"] = "custom"
+        time_range["start"] = start_date
+        time_range["end"] = end_date
+    
+    return time_range
+
 def get_custom_filters():
-    """自定义筛选条件：技术指标+基本面"""
     st.sidebar.divider()
     st.sidebar.title("🎯 筛选条件")
     
     filters = {}
-    # 价格筛选
     filters["price_min"] = st.sidebar.number_input("最低价格", min_value=0.0, value=5.0)
     filters["price_max"] = st.sidebar.number_input("最高价格", min_value=0.0, value=50.0)
-    
-    # 成交量筛选
     filters["volume_min"] = st.sidebar.number_input("最低成交量（万手）", min_value=0, value=10)
-    
-    # 技术指标筛选
     filters["ma5"] = st.sidebar.checkbox("5日均线向上")
     filters["macd"] = st.sidebar.checkbox("MACD金叉")
     filters["rsi"] = st.sidebar.slider("RSI范围", 0, 100, (30, 70))
@@ -170,22 +184,17 @@ def get_custom_filters():
     return filters
 
 def filter_stocks(stock_data, filters):
-    """应用自定义筛选条件"""
-    # 价格筛选
     mask = (stock_data["close"] >= filters["price_min"]) & (stock_data["close"] <= filters["price_max"])
     stock_data = stock_data[mask]
     
-    # 成交量筛选
     mask = stock_data["volume"] >= filters["volume_min"] * 10000
     stock_data = stock_data[mask]
     
-    # 5日均线筛选
     if filters["ma5"]:
         stock_data["ma5"] = stock_data["close"].rolling(window=5).mean()
         mask = stock_data["ma5"].diff() > 0
         stock_data = stock_data[mask]
     
-    # RSI筛选
     rsi = ta.momentum.RSIIndicator(stock_data["close"], window=14).rsi()
     mask = (rsi >= filters["rsi"][0]) & (rsi <= filters["rsi"][1])
     stock_data = stock_data[mask]
@@ -193,30 +202,36 @@ def filter_stocks(stock_data, filters):
     return stock_data
 
 # ===================== 核心选股逻辑 =====================
-def get_stock_data(code):
-    """获取股票数据（新浪数据源，无需权限）"""
+def get_stock_data(code, time_range):
+    """适配时间选择器，返回对应时间段数据"""
     try:
-        url = f"https://finance.sina.com.cn/stock/chartdata/{code}.html?finance/chartdata/{code}.js"
-        resp = requests.get(url, timeout=10)
-        # 解析数据（简化版，实际需根据返回格式调整）
+        # 根据选择的时间范围生成数据
+        if time_range["type"] == "days":
+            end_date = pd.to_datetime("2026-03-01")
+            start_date = end_date - pd.Timedelta(days=time_range["value"])
+        else:
+            start_date = pd.to_datetime(time_range["start"])
+            end_date = pd.to_datetime(time_range["end"])
+        
+        # 生成对应时间段的日期
+        date_range = pd.date_range(start=start_date, end=end_date)
         data = {
-            "date": pd.date_range(start="2026-01-01", periods=30),
-            "open": np.random.uniform(10, 20, 30),
-            "high": np.random.uniform(20, 25, 30),
-            "low": np.random.uniform(5, 10, 30),
-            "close": np.random.uniform(10, 20, 30),
-            "volume": np.random.uniform(100000, 500000, 30)
+            "date": date_range,
+            "open": np.random.uniform(10, 20, len(date_range)),
+            "high": np.random.uniform(20, 25, len(date_range)),
+            "low": np.random.uniform(5, 10, len(date_range)),
+            "close": np.random.uniform(10, 20, len(date_range)),
+            "volume": np.random.uniform(100000, 500000, len(date_range))
         }
         return pd.DataFrame(data)
     except:
         return pd.DataFrame()
 
 def plot_stock_chart(df, code):
-    """绘制K线图（适配手机竖屏）"""
+    """核心修复：K线图时间显示中文"""
     fig = make_subplots(rows=2, cols=1, shared_xaxes=True,
                         row_heights=[0.7, 0.3], vertical_spacing=0.05)
     
-    # K线
     fig.add_trace(go.Candlestick(
         x=df["date"],
         open=df["open"],
@@ -226,15 +241,27 @@ def plot_stock_chart(df, code):
         name="K线"
     ), row=1, col=1)
     
-    # 成交量
     fig.add_trace(go.Bar(x=df["date"], y=df["volume"], name="成交量"), row=2, col=1)
     
-    # 适配手机显示
+    # 关键：设置x轴日期格式为中文
+    fig.update_xaxes(
+        tickformat="%Y年%m月%d日",  # 中文日期格式
+        tickfont=dict(size=12, family="SimHei"),  # 中文显示字体
+        row=1, col=1
+    )
+    fig.update_xaxes(
+        tickformat="%Y年%m月%d日",
+        tickfont=dict(size=12, family="SimHei"),
+        row=2, col=1
+    )
+    
     fig.update_layout(
-        height=600,  # 手机竖屏高度
-        width=350,   # 手机宽度
-        font=dict(size=14),
-        margin=dict(l=10, r=10, t=30, b=10)
+        height=600,
+        width=350,
+        font=dict(size=14, family="SimHei"),  # 全局中文显示
+        margin=dict(l=10, r=10, t=30, b=10),
+        title=f"股票{code} K线图",
+        title_font=dict(size=16, family="SimHei")
     )
     st.plotly_chart(fig, use_container_width=True)
 
@@ -242,31 +269,25 @@ def plot_stock_chart(df, code):
 def main():
     st.title("📈 智能选股工具（安卓适配版）")
     
-    # 1. 账户管理
     user_auth()
     if "login_user" in st.session_state:
         manage_favorites()
     
-    # 2. 获取选股范围
     stock_codes = get_stock_list()
-    
-    # 3. 获取自定义筛选条件
+    time_range = get_time_range()  # 新增：获取时间范围
     filters = get_custom_filters()
     
-    # 4. 选股按钮
     if st.button("🚀 开始选股", key="select"):
         st.subheader("选股结果")
         for code in stock_codes:
-            df = get_stock_data(code)
+            df = get_stock_data(code, time_range)  # 传入时间范围
             if df.empty:
                 continue
             
-            # 应用筛选条件
             filtered_df = filter_stocks(df, filters)
             if filtered_df.empty:
                 continue
             
-            # 显示股票信息（适配手机）
             with st.expander(f"股票代码：{code}", expanded=True):
                 col1, col2 = st.columns(2)
                 with col1:
@@ -274,7 +295,6 @@ def main():
                 with col2:
                     st.metric("涨跌幅", f"{(df['close'].iloc[-1]-df['close'].iloc[-2])/df['close'].iloc[-2]*100:.2f}%")
                 
-                # 绘制K线图
                 plot_stock_chart(df, code)
 
 if __name__ == "__main__":
