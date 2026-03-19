@@ -7,17 +7,27 @@ import numpy as np
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import ta  # 技术指标库
-import tushare as ts  # 替换为 Tushare
+import tushare as ts
 import datetime
 import pickle
 import os
 import time
+import hashlib
 from functools import wraps
 
 # ===================== Tushare 初始化 =====================
 # 请在此处填写你的 Tushare token（免费注册：https://tushare.pro）
-TS_TOKEN = "c9502fa704df4f94794b2349dbd0af4f7503931069e03a6aba51fd74"  # 替换为实际token
+TS_TOKEN = "你的Tushare token"  # 替换为实际token
 pro = ts.pro_api(TS_TOKEN)
+
+# ===================== 全局变量（用于API频率控制）=====================
+LAST_API_CALL = 0
+
+# ===================== 缓存目录设置 =====================
+STOCK_CACHE_FILE = "stock_list_cache.pkl"
+DAILY_CACHE_DIR = "daily_cache"
+if not os.path.exists(DAILY_CACHE_DIR):
+    os.makedirs(DAILY_CACHE_DIR)
 
 # ===================== 重试装饰器 =====================
 def retry(max_retries=3, delay=2):
@@ -152,7 +162,6 @@ def convert_code_to_tushare(code):
     code = code.strip().upper()
     if '.' in code:
         return code  # 已经带后缀
-    # 判断交易所
     if code.startswith('6'):
         return code + '.SH'
     elif code.startswith(('0', '3')):
@@ -160,110 +169,114 @@ def convert_code_to_tushare(code):
     elif code.startswith(('4', '8')):
         return code + '.BJ'
     else:
-        # 默认返回原代码（可能出错）
         return code
 
-# ===================== 数据缓存 =====================
+# ===================== 数据缓存函数 =====================
 @st.cache_data(ttl=3600)
-def fetch_stock_list():
-    """获取所有股票代码列表（使用 Tushare）"""
-    try:
-        df = pro.stock_basic(exchange='', list_status='L', fields='ts_code,symbol,name')
-        if df is not None and not df.empty:
-            # 同时返回 ts_code（带后缀）和 name
-            return df[['symbol', 'name']].rename(columns={'symbol': 'code'})
-        else:
-            return pd.DataFrame({
-                "code": ["000001", "600000", "300001", "000858", "002594"],
-                "name": ["平安银行", "浦发银行", "特锐德", "五粮液", "比亚迪"]
-            })
-    except Exception as e:
-        st.warning(f"获取股票列表失败，使用离线数据。错误: {e}")
-        return pd.DataFrame({
-            "code": ["000001", "600000", "300001", "000858", "002594"],
-            "name": ["平安银行", "浦发银行", "特锐德", "五粮液", "比亚迪"]
-        })
-
-@st.cache_data(ttl=3600)
-def fetch_industry_boards():
-    """获取所有行业板块列表，失败时返回离线数据"""
-    try:
-        # Tushare 的行业分类可能需要积分，此处暂用离线数据
-        return OFFLINE_INDUSTRY_BOARDS
-    except Exception as e:
-        st.warning(f"获取行业板块失败，使用离线数据。错误: {e}")
-        return OFFLINE_INDUSTRY_BOARDS
-
-@st.cache_data(ttl=3600)
-def fetch_concept_boards():
-    """获取所有概念板块列表，失败时返回离线数据"""
-    try:
-        # Tushare 的概念板块可能需要积分，此处暂用离线数据
-        return OFFLINE_CONCEPT_BOARDS
-    except Exception as e:
-        st.warning(f"获取概念板块失败，使用离线数据。错误: {e}")
-        return OFFLINE_CONCEPT_BOARDS
-
-@st.cache_data(ttl=300)
-@retry(max_retries=3, delay=2)
-def fetch_board_stocks(board_name, board_code, board_type):
+def fetch_stock_list(force_refresh=False):
     """
-    获取板块成分股，使用离线数据（Tushare 板块数据可能需要积分）
+    获取所有股票代码列表，优先使用本地缓存，每小时最多请求一次API
+    force_refresh: 强制从网络更新缓存
     """
-    # 直接尝试从离线数据获取
-    offline_codes = OFFLINE_BOARD_STOCKS.get(board_name)
-    if offline_codes:
-        return offline_codes
-    else:
-        st.info(f"离线数据中未找到 {board_name} 的成分股")
-        return []
+    global LAST_API_CALL
+    
+    # 1. 如果强制刷新且距离上次调用超过1小时，尝试从网络获取
+    current_time = time.time()
+    if force_refresh and (current_time - LAST_API_CALL > 3600):
+        try:
+            df = pro.stock_basic(exchange='', list_status='L', fields='ts_code,symbol,name')
+            if df is not None and not df.empty:
+                # 保存到本地缓存文件
+                with open(STOCK_CACHE_FILE, 'wb') as f:
+                    pickle.dump(df[['symbol', 'name']].rename(columns={'symbol': 'code'}), f)
+                LAST_API_CALL = current_time
+                st.success("已从网络更新股票列表并缓存")
+                return df[['symbol', 'name']].rename(columns={'symbol': 'code'})
+        except Exception as e:
+            st.warning(f"网络获取失败: {e}，尝试读取本地缓存")
+    
+    # 2. 尝试读取本地缓存文件
+    if os.path.exists(STOCK_CACHE_FILE):
+        try:
+            with open(STOCK_CACHE_FILE, 'rb') as f:
+                df = pickle.load(f)
+                st.info(f"使用本地缓存的股票列表（{len(df)}只）")
+                return df
+        except Exception as e:
+            st.warning(f"读取缓存失败: {e}")
+    
+    # 3. 最后回退到离线数据
+    st.warning("使用离线股票数据（可能不完整）")
+    return pd.DataFrame({
+        "code": ["000001", "600000", "300001", "000858", "002594"],
+        "name": ["平安银行", "浦发银行", "特锐德", "五粮液", "比亚迪"]
+    })
+
+def get_cache_path(symbol, start_date, end_date):
+    """生成日线数据缓存文件路径（基于参数哈希）"""
+    param_str = f"{symbol}_{start_date}_{end_date}"
+    hash_str = hashlib.md5(param_str.encode()).hexdigest()
+    return os.path.join(DAILY_CACHE_DIR, f"{hash_str}.pkl")
 
 @st.cache_data(ttl=300)
 @retry(max_retries=3, delay=3)
 def fetch_daily_data(symbol, start_date, end_date):
     """
-    获取股票日线数据（使用 Tushare）
-    symbol: 股票代码，如 "000001" 或 "000001.SZ"
-    start_date: 格式 "YYYYMMDD"
-    end_date: 格式 "YYYYMMDD"
+    获取股票日线数据，优先读取本地缓存，再请求网络
     """
+    cache_path = get_cache_path(symbol, start_date, end_date)
+    
+    # 1. 检查缓存是否存在且在有效期内（7天内）
+    if os.path.exists(cache_path):
+        file_time = os.path.getmtime(cache_path)
+        if time.time() - file_time < 7 * 24 * 3600:  # 7天有效
+            try:
+                with open(cache_path, 'rb') as f:
+                    df = pickle.load(f)
+                    st.caption(f"使用缓存数据: {symbol}")
+                    return df
+            except:
+                pass  # 读取失败则重新获取
+    
+    # 2. 控制API调用频率（避免超过限制）
+    global LAST_API_CALL
+    current_time = time.time()
+    if current_time - LAST_API_CALL < 0.5:  # 至少间隔0.5秒
+        time.sleep(0.5 - (current_time - LAST_API_CALL))
+    
+    # 3. 请求网络
     try:
-        # 转换代码格式
         ts_code = convert_code_to_tushare(symbol)
-        
-        # 调用 Tushare 接口
         df = pro.daily(ts_code=ts_code, start_date=start_date, end_date=end_date)
+        LAST_API_CALL = time.time()
+        
         if df is None or df.empty:
             return pd.DataFrame()
         
-        # 按交易日期排序（升序）
         df = df.sort_values('trade_date')
-        
-        # 重命名字段以匹配系统习惯
         df.rename(columns={
             "trade_date": "date",
             "open": "open",
             "high": "high",
             "low": "low",
             "close": "close",
-            "vol": "volume",        # 注意 Tushare 返回的是手数（1手=100股）
+            "vol": "volume",
             "amount": "amount",
-            "pct_chg": "pct_change" # Tushare 返回的涨跌幅（百分比）
+            "pct_chg": "pct_change"
         }, inplace=True)
-        
-        # 将日期列转为 datetime 并设为索引
         df["date"] = pd.to_datetime(df["date"])
         df.set_index("date", inplace=True)
         
-        # 成交量转换为股数（如果保持为手数，则后续处理需注意）
-        # 我们保留为手数，在筛选时可能用到（1手=100股），可根据需要调整
-        # 此处保持原样
+        # 保存到缓存
+        with open(cache_path, 'wb') as f:
+            pickle.dump(df, f)
         
         return df
     except Exception as e:
         st.warning(f"获取 {symbol} 数据失败: {e}")
-        raise e  # 重试装饰器会处理
+        raise e
 
+# ===================== 技术指标添加 =====================
 def add_technical_indicators(df):
     """添加常用技术指标"""
     if df.empty or len(df) < 20:
@@ -368,7 +381,19 @@ def manage_favorites():
                             pickle.dump(user_data, f)
                         st.rerun()
 
-# ===================== 自定义板块搜索 =====================
+# ===================== 自定义板块搜索（使用离线数据）=====================
+def fetch_industry_boards():
+    """获取所有行业板块列表，使用离线数据"""
+    return OFFLINE_INDUSTRY_BOARDS
+
+def fetch_concept_boards():
+    """获取所有概念板块列表，使用离线数据"""
+    return OFFLINE_CONCEPT_BOARDS
+
+def fetch_board_stocks(board_name, board_code, board_type):
+    """获取板块成分股，使用离线数据"""
+    return OFFLINE_BOARD_STOCKS.get(board_name, [])
+
 def search_custom_boards():
     with st.sidebar:
         st.divider()
@@ -492,10 +517,19 @@ def select_stock_pool():
         st.divider()
         st.title("📋 选股范围")
         
-        plate = st.selectbox(
-            "选择板块",
-            ["全部A股", "沪深300成分股", "创业板", "科创板", "自定义代码", "自定义板块搜索"]
-        )
+        # 刷新按钮和板块选择
+        col1, col2 = st.columns([0.7, 0.3])
+        with col1:
+            plate = st.selectbox(
+                "选择板块",
+                ["全部A股", "沪深300成分股", "创业板", "科创板", "自定义代码", "自定义板块搜索"]
+            )
+        with col2:
+            if st.button("🔄 刷新列表", help="手动从Tushare更新股票列表"):
+                with st.spinner("正在更新股票列表..."):
+                    fetch_stock_list.clear()  # 清除Streamlit缓存
+                    fetch_stock_list(force_refresh=True)
+                    st.rerun()
         
         if plate == "自定义板块搜索":
             search_custom_boards()
@@ -520,12 +554,8 @@ def select_stock_pool():
             if plate == "全部A股":
                 codes = stock_list["code"].tolist()
             elif plate == "沪深300成分股":
-                try:
-                    # Tushare 获取沪深300成分股需要指数日线接口？简化处理，返回部分
-                    # 这里暂时返回离线数据，后续可完善
-                    codes = stock_list["code"].tolist()[:300]
-                except:
-                    codes = stock_list["code"].tolist()[:300]
+                # 简化处理，返回部分股票
+                codes = stock_list["code"].tolist()[:300]
             elif plate == "创业板":
                 codes = [c for c in stock_list["code"] if c.startswith("30")]
             elif plate == "科创板":
@@ -533,7 +563,7 @@ def select_stock_pool():
             else:
                 codes = []
         
-        # 修正滑块逻辑，处理数量为1的情况
+        # 滑块控制数量
         if codes:
             if len(codes) == 1:
                 selected_codes = codes
@@ -614,7 +644,7 @@ def apply_filters(df, filters):
     
     if not (filters["price_min"] <= latest["close"] <= filters["price_max"]):
         return False
-    if latest["volume"] / 10000 < filters["volume_min"]:  # volume 是手数，1手=100股，此处转换为万股
+    if latest["volume"] / 10000 < filters["volume_min"]:
         return False
     
     if filters["ma5_direction"] == "向上" and df["ma5"].diff().iloc[-1] <= 0:
@@ -693,12 +723,12 @@ def run_screening():
                 "名称": name,
                 "最新价": df["close"].iloc[-1],
                 "涨跌幅(%)": df["pct_change"].iloc[-1],
-                "成交量(万股)": df["volume"].iloc[-1] / 10000,  # 手数转万股
+                "成交量(万股)": df["volume"].iloc[-1] / 10000,
                 "RSI": df["rsi"].iloc[-1],
                 "MACD": df["macd_diff"].iloc[-1],
                 "数据": df
             })
-        time.sleep(0.1)  # 避免请求过快
+        time.sleep(0.1)
     
     progress_bar.empty()
     st.session_state["screen_results"] = results
