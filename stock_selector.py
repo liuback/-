@@ -17,7 +17,7 @@ from functools import wraps
 
 # ===================== Tushare 初始化 =====================
 # 请在此处填写你的 Tushare token（免费注册：https://tushare.pro）
-TS_TOKEN = "你的Tushare token"  # 替换为实际token
+TS_TOKEN = "c9502fa704df4f94794b2349dbd0af4f7503931069e03a6aba51fd74"  # 替换为实际token
 pro = ts.pro_api(TS_TOKEN)
 
 # ===================== 全局变量（用于API频率控制）=====================
