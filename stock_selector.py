@@ -734,25 +734,41 @@ def run_screening():
     st.session_state["screen_results"] = results
     st.success(f"筛选完成，共找到 {len(results)} 只股票")
 
-# ===================== 回测核心函数 =====================
-def backtest_strategy(df, signal_func):
+# ===================== 回测核心函数（含交易成本）=====================
+def backtest_strategy(df, signal_func, commission_rate=0.00025, tax_rate=0.0005):
     """
-    通用回测框架
-    signal_func: 函数，输入df，返回信号Series（1买入，-1卖出，0持有）
+    通用回测框架，考虑佣金和印花税
+    commission_rate: 佣金费率（双向），默认0.025%
+    tax_rate: 印花税率（卖出单边），默认0.05%
     """
     signals = signal_func(df)
     df = df.copy()
     df["signal"] = signals
     
+    # 持仓：信号为1时全仓，-1时空仓，其他情况保持前值
     df["position"] = df["signal"].replace(0, np.nan).ffill().fillna(0)
-    df["position"] = df["position"].clip(lower=0)
+    df["position"] = df["position"].clip(lower=0)  # 不允许做空
     
+    # 每日收益率（价格涨跌幅）
     df["returns"] = df["close"].pct_change()
-    df["strategy_returns"] = df["position"].shift(1) * df["returns"]
     
+    # 基础收益 = 前一日持仓 * 当日涨跌幅
+    base_returns = df["position"].shift(1) * df["returns"]
+    
+    # 买入成本：信号为1的交易日扣除佣金
+    buy_cost = (df["signal"] == 1) * commission_rate
+    
+    # 卖出成本：信号为-1的交易日扣除佣金+印花税
+    sell_cost = (df["signal"] == -1) * (commission_rate + tax_rate)
+    
+    # 策略日收益率 = 基础收益 - 买入成本 - 卖出成本
+    df["strategy_returns"] = base_returns - buy_cost - sell_cost
+    
+    # 累计收益
     df["cumulative_returns"] = (1 + df["returns"]).cumprod()
     df["cumulative_strategy"] = (1 + df["strategy_returns"]).cumprod()
     
+    # 绩效指标
     total_return = df["cumulative_strategy"].iloc[-1] - 1
     benchmark_return = df["cumulative_returns"].iloc[-1] - 1
     
@@ -761,11 +777,14 @@ def backtest_strategy(df, signal_func):
     drawdown = (cumulative - rolling_max) / rolling_max
     max_drawdown = drawdown.min()
     
+    # 统计交易次数（信号不为0的天数）
+    trade_count = (df["signal"] != 0).sum()
+    
     return df, {
         "总收益率": total_return,
         "基准收益率": benchmark_return,
         "最大回撤": max_drawdown,
-        "交易次数": (df["signal"] != 0).sum()
+        "交易次数": trade_count
     }
 
 # ===================== 策略函数库 =====================
@@ -807,7 +826,35 @@ def kdj_cross_strategy(df):
     signals[sell_signals] = -1
     return signals
 
-# ===================== 直接回测界面（修改点：添加名称查询）=====================
+# ===================== 新增：自定义策略函数 =====================
+def custom_strategy(df, buy_expr, sell_expr):
+    """
+    根据用户输入的表达式生成交易信号
+    buy_expr: 买入条件表达式（例如 "ma5 > ma20 and rsi < 30"）
+    sell_expr: 卖出条件表达式（例如 "ma5 < ma20 or rsi > 70"）
+    返回信号Series：1买入，-1卖出，0持有
+    """
+    try:
+        # 计算买入信号和卖出信号（布尔值）
+        buy_signal = df.eval(buy_expr) if buy_expr.strip() else pd.Series(False, index=df.index)
+        sell_signal = df.eval(sell_expr) if sell_expr.strip() else pd.Series(False, index=df.index)
+        
+        # 初始化信号全为0
+        signals = pd.Series(0, index=df.index)
+        
+        # 生成买入信号（当买入条件为真且之前没有持仓时？这里简单处理：买入条件为真时设置为1，卖出条件为真时设置为-1）
+        # 注意：可能会出现同一天既有买入又有卖出的情况，优先处理卖出（或自定义逻辑）
+        # 这里设定：如果卖出条件为真，则信号为-1（无论买入条件）；否则如果买入条件为真，则信号为1
+        signals[sell_signal] = -1
+        signals[buy_signal & ~sell_signal] = 1
+        
+        return signals
+    except Exception as e:
+        st.error(f"自定义策略表达式错误: {e}")
+        # 返回全0信号（不交易）
+        return pd.Series(0, index=df.index)
+
+# ===================== 直接回测界面（增加自定义策略）=====================
 def direct_backtest_ui():
     with st.sidebar:
         st.divider()
@@ -817,11 +864,14 @@ def direct_backtest_ui():
         
         strategy_option = st.selectbox(
             "选择策略",
-            ["均线金叉", "MACD金叉", "RSI超买超卖", "KDJ金叉"],
+            ["均线金叉", "MACD金叉", "RSI超买超卖", "KDJ金叉", "自定义策略"],
             key="direct_strategy"
         )
         
         params = {}
+        buy_expr = ""
+        sell_expr = ""
+        
         if strategy_option == "均线金叉":
             col1, col2 = st.columns(2)
             with col1:
@@ -834,6 +884,19 @@ def direct_backtest_ui():
                 params["oversold"] = st.number_input("超卖线", min_value=10, max_value=40, value=30, step=1)
             with col2:
                 params["overbought"] = st.number_input("超买线", min_value=60, max_value=90, value=70, step=1)
+        elif strategy_option == "自定义策略":
+            st.markdown("可用列名：`open`, `high`, `low`, `close`, `volume`, `ma5`, `ma10`, `ma20`, `ma60`, `macd`, `macd_signal`, `rsi`, `kdj_k`, `kdj_d`, `bollinger_*`, `volume_ma5`")
+            st.markdown("使用 `&` (与), `|` (或), `~` (非)，例如：`ma5 > ma20 & rsi < 30`")
+            buy_expr = st.text_input("买入条件", value="ma5 > ma20 and rsi < 30")
+            sell_expr = st.text_input("卖出条件", value="ma5 < ma20 or rsi > 70")
+        
+        # 交易成本设置
+        st.subheader("交易成本")
+        col1, col2 = st.columns(2)
+        with col1:
+            commission_rate = st.number_input("佣金费率（‰）", min_value=0.0, max_value=3.0, value=0.25, step=0.05) / 1000  # 转换为小数
+        with col2:
+            tax_rate = st.number_input("印花税率（‰）", min_value=0.0, max_value=3.0, value=0.5, step=0.05) / 1000
         
         if st.button("🚀 运行回测", use_container_width=True, key="run_direct_btn"):
             if not stock_code.strip():
@@ -860,6 +923,7 @@ def direct_backtest_ui():
                 
                 df = add_technical_indicators(df)
                 
+                # 根据策略选择信号函数
                 if strategy_option == "均线金叉":
                     signal_func = lambda d: ma_cross_strategy(d, params.get("short", 5), params.get("long", 20))
                 elif strategy_option == "MACD金叉":
@@ -868,23 +932,28 @@ def direct_backtest_ui():
                     signal_func = lambda d: rsi_strategy(d, params.get("oversold", 30), params.get("overbought", 70))
                 elif strategy_option == "KDJ金叉":
                     signal_func = kdj_cross_strategy
+                elif strategy_option == "自定义策略":
+                    signal_func = lambda d: custom_strategy(d, buy_expr, sell_expr)
                 else:
                     signal_func = ma_cross_strategy
                 
-                result_df, metrics = backtest_strategy(df, signal_func)
+                # 调用回测函数，传入成本参数
+                result_df, metrics = backtest_strategy(df, signal_func, commission_rate, tax_rate)
                 
                 st.session_state["direct_result"] = {
                     "code": stock_code.strip(),
-                    "name": name,  # 新增名称字段
+                    "name": name,
                     "df": result_df,
                     "metrics": metrics,
-                    "strategy": strategy_option
+                    "strategy": strategy_option,
+                    "commission": commission_rate * 1000,  # 保存用于显示
+                    "tax": tax_rate * 1000
                 }
                 st.rerun()
 
 # ===================== 主界面 =====================
 def main():
-    st.title("📈 智能选股工具（Tushare 数据源版）")
+    st.title("📈 智能选股工具（含自定义策略）")
     
     with st.sidebar:
         st.header("配置面板")
@@ -938,13 +1007,16 @@ def main():
                     st.plotly_chart(fig, use_container_width=True)
                     
                     if st.button(f"回测此股票 - {res['代码']}", key=f"backtest_{res['代码']}"):
+                        # 使用默认成本（可修改）
                         result_df, metrics = backtest_strategy(df, ma_cross_strategy)
                         st.session_state["direct_result"] = {
                             "code": res['代码'],
                             "name": res['名称'],
                             "df": result_df,
                             "metrics": metrics,
-                            "strategy": "均线金叉"
+                            "strategy": "均线金叉",
+                            "commission": 0.25,
+                            "tax": 0.5
                         }
                         st.rerun()
         else:
@@ -953,9 +1025,15 @@ def main():
     with tab2:
         if "direct_result" in st.session_state:
             res = st.session_state["direct_result"]
-            # 使用名称显示（如果存在）
             display_name = res.get('name', res['code'])
             st.subheader(f"📊 回测结果 - {display_name} ({res['strategy']})")
+            
+            # 显示成本信息
+            col1, col2 = st.columns(2)
+            with col1:
+                st.caption(f"佣金费率: {res.get('commission', 0.25):.3f}‰")
+            with col2:
+                st.caption(f"印花税率: {res.get('tax', 0.5):.3f}‰")
             
             metrics = res["metrics"]
             col1, col2, col3, col4 = st.columns(4)
@@ -967,7 +1045,7 @@ def main():
             df = res["df"]
             
             fig = go.Figure()
-            fig.add_trace(go.Scatter(x=df.index, y=df["cumulative_strategy"], name="策略收益"))
+            fig.add_trace(go.Scatter(x=df.index, y=df["cumulative_strategy"], name="策略收益（含成本）"))
             fig.add_trace(go.Scatter(x=df.index, y=df["cumulative_returns"], name="基准收益"))
             fig.update_layout(title="策略收益 vs 基准", xaxis_title="日期", yaxis_title="累计收益")
             st.plotly_chart(fig, use_container_width=True)
