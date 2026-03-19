@@ -2,7 +2,6 @@ streamlit>=1.30.0
 pandas>=2.0.0
 plotly>=5.18.0
 ta>=0.11.0
-TA-Lib==0.4.25
-requests>=2.31.0
+akshare>=1.13.0
 numpy>=1.26.0
 streamlit-extras>=0.4.0
