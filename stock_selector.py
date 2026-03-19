@@ -807,7 +807,7 @@ def kdj_cross_strategy(df):
     signals[sell_signals] = -1
     return signals
 
-# ===================== 直接回测界面 =====================
+# ===================== 直接回测界面（修改点：添加名称查询）=====================
 def direct_backtest_ui():
     with st.sidebar:
         st.divider()
@@ -852,6 +852,12 @@ def direct_backtest_ui():
                     st.error(f"获取 {stock_code.strip()} 数据失败。可能原因：网络连接问题、股票代码错误、或该股票在所选时间段内无数据。请稍后重试或检查代码。")
                     return
                 
+                # 获取股票名称
+                stock_list = fetch_stock_list()
+                code_for_search = stock_code.strip().split('.')[0]  # 取纯数字部分
+                name_row = stock_list[stock_list["code"] == code_for_search]
+                name = name_row["name"].iloc[0] if not name_row.empty else stock_code.strip()
+                
                 df = add_technical_indicators(df)
                 
                 if strategy_option == "均线金叉":
@@ -869,6 +875,7 @@ def direct_backtest_ui():
                 
                 st.session_state["direct_result"] = {
                     "code": stock_code.strip(),
+                    "name": name,  # 新增名称字段
                     "df": result_df,
                     "metrics": metrics,
                     "strategy": strategy_option
@@ -934,6 +941,7 @@ def main():
                         result_df, metrics = backtest_strategy(df, ma_cross_strategy)
                         st.session_state["direct_result"] = {
                             "code": res['代码'],
+                            "name": res['名称'],
                             "df": result_df,
                             "metrics": metrics,
                             "strategy": "均线金叉"
@@ -945,7 +953,9 @@ def main():
     with tab2:
         if "direct_result" in st.session_state:
             res = st.session_state["direct_result"]
-            st.subheader(f"📊 回测结果 - {res['code']} ({res['strategy']})")
+            # 使用名称显示（如果存在）
+            display_name = res.get('name', res['code'])
+            st.subheader(f"📊 回测结果 - {display_name} ({res['strategy']})")
             
             metrics = res["metrics"]
             col1, col2, col3, col4 = st.columns(4)
